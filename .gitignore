@@ -1,0 +1,27 @@
+# Build
+target/
+target-*/
+*.pdb
+
+# Secrets and local config
+.env
+launcher.json
+
+# Portable output (publish via GitHub Releases, not git)
+release/
+
+# IDE / editor
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+
+# Logs and OS junk
+*.log
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Local capture / sample dumps (not source)
+samples/
