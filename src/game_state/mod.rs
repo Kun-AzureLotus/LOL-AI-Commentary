@@ -468,6 +468,9 @@ mod tests {
                 killer_name: Some("Ahri".to_string()),
                 victim_name: Some("Jinx".to_string()),
                 assisters: vec![],
+                killer_is_ally: false,
+                victim_is_ally: false,
+                victim_is_local_player: false,
             },
             DetectedEvent::TowerDestroyed {
                 event_id: Some(2),

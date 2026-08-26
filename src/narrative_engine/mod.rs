@@ -255,6 +255,15 @@ fn confirmed_event_intent(events: &[DetectedEvent]) -> Option<NarrativeIntent> {
                     NarrativeMode::ConfirmedEvent,
                 )
             }
+            DetectedEvent::ChampionKilled { .. } if event.involves_player_team() => {
+                NarrativeIntent::new_with_mode(
+                    true,
+                    Priority::High,
+                    Emotion::Excited,
+                    Topic::Kill,
+                    NarrativeMode::ConfirmedEvent,
+                )
+            }
             DetectedEvent::ChampionKilled { .. } => NarrativeIntent::new_with_mode(
                 true,
                 Priority::Medium,
@@ -262,6 +271,15 @@ fn confirmed_event_intent(events: &[DetectedEvent]) -> Option<NarrativeIntent> {
                 Topic::Kill,
                 NarrativeMode::ConfirmedEvent,
             ),
+            DetectedEvent::TowerDestroyed { .. } if event.is_high_value_tower() => {
+                NarrativeIntent::new_with_mode(
+                    true,
+                    Priority::High,
+                    Emotion::Excited,
+                    Topic::Objective,
+                    NarrativeMode::ConfirmedEvent,
+                )
+            }
             DetectedEvent::TowerDestroyed { .. } | DetectedEvent::RiftHeraldTaken { .. } => {
                 NarrativeIntent::new_with_mode(
                     true,
@@ -529,6 +547,25 @@ mod tests {
 
         assert_eq!(intent.mode, NarrativeMode::ConfirmedEvent);
         assert_eq!(intent.priority, Priority::Medium);
+        assert_eq!(intent.topic, Topic::Objective);
+    }
+
+    #[test]
+    fn friendly_kill_is_high_priority_confirmed_event() {
+        let state = unified_state(vec![player_team_kill(1, true, false, false)], Vec::new());
+        let intent = build_narrative_intent_from_unified_state(&state);
+        assert_eq!(intent.mode, NarrativeMode::ConfirmedEvent);
+        assert_eq!(intent.priority, Priority::High);
+        assert_eq!(intent.topic, Topic::Kill);
+        assert!(intent.need_commentary);
+    }
+
+    #[test]
+    fn nexus_tower_is_high_priority_objective() {
+        let state = unified_state(vec![high_tower(1)], Vec::new());
+        let intent = build_narrative_intent_from_unified_state(&state);
+        assert_eq!(intent.mode, NarrativeMode::ConfirmedEvent);
+        assert_eq!(intent.priority, Priority::High);
         assert_eq!(intent.topic, Topic::Objective);
     }
 
@@ -860,11 +897,33 @@ mod tests {
     }
 
     fn champion_kill(event_id: u32) -> DetectedEvent {
+        player_team_kill(event_id, false, false, false)
+    }
+
+    fn player_team_kill(
+        event_id: u32,
+        killer_is_ally: bool,
+        victim_is_ally: bool,
+        victim_is_local_player: bool,
+    ) -> DetectedEvent {
         DetectedEvent::ChampionKilled {
             event_id: Some(event_id),
             event_time: Some(100.0),
             killer_name: Some("Ahri".to_string()),
             victim_name: Some("Jinx".to_string()),
+            assisters: Vec::new(),
+            killer_is_ally,
+            victim_is_ally,
+            victim_is_local_player,
+        }
+    }
+
+    fn high_tower(event_id: u32) -> DetectedEvent {
+        DetectedEvent::TowerDestroyed {
+            event_id: Some(event_id),
+            event_time: Some(100.0),
+            killer_name: Some("Ahri".to_string()),
+            turret_killed: Some("Turret_T1_C_01_A".to_string()),
             assisters: Vec::new(),
         }
     }
@@ -874,7 +933,7 @@ mod tests {
             event_id: Some(event_id),
             event_time: Some(100.0),
             killer_name: Some("Ahri".to_string()),
-            turret_killed: Some("Turret_T1_C_01_A".to_string()),
+            turret_killed: Some("Turret_T1_L_03_A".to_string()),
             assisters: Vec::new(),
         }
     }

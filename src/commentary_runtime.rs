@@ -17,7 +17,7 @@ use crate::{
     prompt_builder::{build_prompt_with_style_and_language, PromptOutputLanguage},
     riot_live_client::{AllGameData, RiotLiveClient, RiotLiveClientConfig},
     state_fusion::{fuse_state, UnifiedMatchState},
-    tts::{LocalTtsEngine, TtsConfig, TtsPlayback, TtsPlaybackClass},
+    tts::{TtsConfig, TtsEngine, TtsPlayback, TtsPlaybackClass},
     visibility_filter::{VisibilityFilter, VisibilityFilterOutput},
 };
 
@@ -34,11 +34,14 @@ pub struct CommentaryRuntimeConfig {
     pub ai_hint: Arc<AtomicU8>,
 }
 
-pub async fn run_commentary_pipeline(
+pub async fn run_commentary_pipeline<E>(
     config: CommentaryRuntimeConfig,
-    tts: TtsPlayback<LocalTtsEngine>,
+    tts: TtsPlayback<E>,
     stop: Arc<AtomicBool>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    E: TtsEngine + Clone + 'static,
+{
     let riot_client = RiotLiveClient::new(RiotLiveClientConfig::default())?;
     let obs_config = match ObsVisionConfig::from_env() {
         Ok(config) => Some(config),
@@ -261,12 +264,18 @@ fn print_events(events: &[DetectedEvent]) {
                 killer_name,
                 victim_name,
                 assisters,
+                killer_is_ally,
+                victim_is_ally,
+                victim_is_local_player,
                 ..
             } => {
                 println!(
-                    "ChampionKilled: {} killed {}",
+                    "ChampionKilled: {} killed {} (killer_is_ally={}, victim_is_ally={}, victim_is_local_player={})",
                     display_optional(killer_name),
-                    display_optional(victim_name)
+                    display_optional(victim_name),
+                    killer_is_ally,
+                    victim_is_ally,
+                    victim_is_local_player
                 );
                 if !assisters.is_empty() {
                     println!("Assists: {}", assisters.join(", "));

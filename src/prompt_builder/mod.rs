@@ -238,6 +238,9 @@ mod tests {
             killer_name: Some("Ahri".to_string()),
             victim_name: Some("Jinx".to_string()),
             assisters: vec!["Lee Sin".to_string()],
+            killer_is_ally: false,
+            victim_is_ally: false,
+            victim_is_local_player: false,
         };
 
         let prompt = build_prompt(&base_game_state(), &base_intent(), Some(&latest_event));
@@ -245,6 +248,8 @@ mod tests {
         assert!(prompt.contains("\"type\":\"ChampionKilled\""));
         assert!(prompt.contains("\"killer_name\":\"Ahri\""));
         assert!(prompt.contains("\"victim_name\":\"Jinx\""));
+        assert!(prompt.contains("\"killer_is_ally\":false"));
+        assert!(prompt.contains("\"victim_is_ally\":false"));
         assert!(prompt.contains(output_format_rule()));
         assert!(prompt.contains("## ConfirmedEvent"));
     }
@@ -291,6 +296,9 @@ mod tests {
             killer_name: Some("Ahri".to_string()),
             victim_name: Some("Jinx".to_string()),
             assisters: vec!["Lee Sin".to_string()],
+            killer_is_ally: false,
+            victim_is_ally: false,
+            victim_is_local_player: false,
         };
         let clusters = [sample_visible_activity()];
 
@@ -420,6 +428,9 @@ mod tests {
             killer_name: Some("Ahri".to_string()),
             victim_name: Some("Jinx".to_string()),
             assisters: vec!["Lee Sin".to_string()],
+            killer_is_ally: false,
+            victim_is_ally: false,
+            victim_is_local_player: false,
         };
         serde_json::to_string_pretty(&latest_event)
             .unwrap()

@@ -9,12 +9,14 @@ use std::{
 
 use crate::{
     commentary_runtime::{run_commentary_pipeline, CommentaryRuntimeConfig},
-    tts::{LocalTtsEngine, TtsPlayback},
+    tts::{SelectedTtsEngine, TtsPlayback},
 };
 
+mod app_volume;
 mod config;
 mod connection;
 mod i18n;
+mod oriental_background;
 mod theme;
 mod ui;
 
@@ -22,14 +24,21 @@ pub use config::{
     apply_start, apply_started, apply_stop, apply_stop_requested, env_llm_api_key, env_llm_model,
     friendly_llm_startup_error, style_tts_emotion, validate_custom_style_prompt, validate_volume,
     wrap_style_instruction, AiConnectionHint, CommentaryStyle, ConnectionProvider, GameType,
-    CommentaryLanguage, LauncherConfig, LauncherStatus, ObsConnectionHint, UiLanguage, UiTheme,
+    CommentaryLanguage, LauncherConfig, LauncherStatus, ObsConnectionHint, TtsProvider, UiLanguage,
+    UiTheme, start_action_enabled, stop_action_enabled,
     DEFAULT_CUSTOM_STYLE_PROMPT, MAX_CUSTOM_STYLE_PROMPT_CHARS,
     LLM_ENV_HINT,
     OPENROUTER_BASE_URL, SYSTEM_DEFAULT_VOICE, TEST_VOICE_TEXT,
 };
+pub use app_volume::{
+    apply_app_volume_when_available, get_app_volume_percent, percent_from_scalar,
+    scalar_from_percent, set_app_volume_percent, AppVolumeError,
+};
+pub use crate::tts::TtsConnectionHint;
 pub use connection::{
-    check_startup_requirements, play_test_voice, play_test_voice_text, resolve_llm_config,
-    test_llm_connection,
+    check_startup_requirements, create_pipeline_tts, list_elevenlabs_voices,
+    play_elevenlabs_test_voice, play_test_voice, play_test_voice_text, resolve_llm_config,
+    test_llm_connection, validate_commentary_start, ELEVENLABS_API_KEY_NOT_CONFIGURED,
 };
 
 pub const STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(8);
@@ -69,23 +78,32 @@ impl Drop for RuntimeGuard {
 
 pub struct PipelineSession {
     stop: Arc<AtomicBool>,
-    tts: Option<TtsPlayback<LocalTtsEngine>>,
+    tts: Option<TtsPlayback<SelectedTtsEngine>>,
     join: Option<JoinHandle<()>>,
     obs_hint: Arc<AtomicU8>,
     ai_hint: Arc<AtomicU8>,
+    tts_hint: Arc<AtomicU8>,
 }
 
 impl PipelineSession {
-    pub fn start(config: LauncherConfig, session_api_key: Option<String>) -> Result<Self, String> {
-        let llm = check_startup_requirements(&config, session_api_key.as_deref())?;
+    pub fn start(
+        config: LauncherConfig,
+        session_api_key: Option<String>,
+        elevenlabs_api_key: Option<String>,
+    ) -> Result<Self, String> {
+        let (llm, engine) = validate_commentary_start(
+            &config,
+            session_api_key.as_deref(),
+            elevenlabs_api_key.as_deref(),
+            config::env_elevenlabs_api_key(),
+        )?;
         config.save_to_disk()?;
         let style_instruction = config.style_instruction()?;
 
         let tts_config = config.to_tts_config();
-        let tts = TtsPlayback::with_config(
-            LocalTtsEngine::with_config(tts_config.clone()),
-            tts_config.clone(),
-        );
+        let tts_hint = Arc::new(AtomicU8::new(TtsConnectionHint::Unknown.as_u8()));
+        let tts = TtsPlayback::with_config(engine, tts_config.clone())
+            .with_status_hint(tts_hint.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let obs_hint = Arc::new(AtomicU8::new(ObsConnectionHint::Unknown.as_u8()));
         let ai_hint = Arc::new(AtomicU8::new(AiConnectionHint::Connected.as_u8()));
@@ -100,7 +118,13 @@ impl PipelineSession {
         };
         let session_tts = tts.clone();
 
-        Self::spawn(stop, Some(tts), obs_hint, ai_hint, move |session_stop| {
+        Self::spawn(
+            stop,
+            Some(tts),
+            obs_hint,
+            ai_hint,
+            tts_hint,
+            move |session_stop| {
             let runtime = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -116,14 +140,16 @@ impl PipelineSession {
             {
                 eprintln!("[Launcher Error] {error}");
             }
-        })
+        },
+        )
     }
 
     fn spawn<F>(
         stop: Arc<AtomicBool>,
-        tts: Option<TtsPlayback<LocalTtsEngine>>,
+        tts: Option<TtsPlayback<SelectedTtsEngine>>,
         obs_hint: Arc<AtomicU8>,
         ai_hint: Arc<AtomicU8>,
+        tts_hint: Arc<AtomicU8>,
         runner: F,
     ) -> Result<Self, String>
     where
@@ -145,6 +171,7 @@ impl PipelineSession {
             join: Some(join),
             obs_hint,
             ai_hint,
+            tts_hint,
         })
     }
 
@@ -154,6 +181,10 @@ impl PipelineSession {
 
     pub fn ai_hint(&self) -> AiConnectionHint {
         AiConnectionHint::from_u8(self.ai_hint.load(Ordering::SeqCst))
+    }
+
+    pub fn tts_hint(&self) -> TtsConnectionHint {
+        TtsConnectionHint::from_u8(self.tts_hint.load(Ordering::SeqCst))
     }
 
     pub fn has_exited(&self) -> bool {
@@ -229,6 +260,7 @@ mod tests {
             None,
             Arc::new(AtomicU8::new(0)),
             Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU8::new(0)),
             |stop| {
                 while !stop.load(Ordering::SeqCst) {
                     thread::sleep(Duration::from_millis(10));
@@ -257,6 +289,7 @@ mod tests {
             None,
             Arc::new(AtomicU8::new(0)),
             Arc::new(AtomicU8::new(0)),
+            Arc::new(AtomicU8::new(0)),
             |_| {},
         );
         match second {
@@ -271,11 +304,27 @@ mod tests {
     }
 
     #[test]
+    fn elevenlabs_missing_key_does_not_acquire_runtime() {
+        let _lock = lifecycle_lock();
+        let before = active_commentary_runtime_count();
+        let config = LauncherConfig {
+            model: "unit-test-model".into(),
+            tts_provider: TtsProvider::ElevenLabs,
+            ..LauncherConfig::default()
+        };
+        let error = validate_commentary_start(&config, Some("llm-session-key"), None, None)
+            .unwrap_err();
+        assert_eq!(error, ELEVENLABS_API_KEY_NOT_CONFIGURED);
+        assert_eq!(active_commentary_runtime_count(), before);
+    }
+
+    #[test]
     fn stop_waits_until_pipeline_exits() {
         let _lock = lifecycle_lock();
         let mut session = PipelineSession::spawn(
             Arc::new(AtomicBool::new(false)),
             None,
+            Arc::new(AtomicU8::new(0)),
             Arc::new(AtomicU8::new(0)),
             Arc::new(AtomicU8::new(0)),
             |stop| {
@@ -300,6 +349,7 @@ mod tests {
         let mut session = PipelineSession::spawn(
             Arc::new(AtomicBool::new(false)),
             None,
+            Arc::new(AtomicU8::new(0)),
             Arc::new(AtomicU8::new(0)),
             Arc::new(AtomicU8::new(0)),
             |_| {

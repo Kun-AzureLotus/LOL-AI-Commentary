@@ -62,6 +62,9 @@ mod tests {
             killer_name: Some("Ahri".to_string()),
             victim_name: Some("Jinx".to_string()),
             assisters: vec!["Lee Sin".to_string()],
+            killer_is_ally: false,
+            victim_is_ally: false,
+            victim_is_local_player: false,
         };
 
         let unified = fuse_state(base_game_state(), vec![event.clone()], empty_visibility());

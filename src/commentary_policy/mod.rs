@@ -129,6 +129,13 @@ fn decide_confirmed_event(input: CommentaryPolicyInput<'_>) -> CommentaryPolicyD
                 NarrativeMode::ConfirmedEvent,
                 Topic::TeamFight,
             ),
+            DetectedEvent::ChampionKilled { .. } if event.involves_player_team() => decision(
+                true,
+                Priority::High,
+                Emotion::Excited,
+                NarrativeMode::ConfirmedEvent,
+                Topic::Kill,
+            ),
             DetectedEvent::ChampionKilled { .. } => decision(
                 true,
                 Priority::Medium,
@@ -144,6 +151,13 @@ fn decide_confirmed_event(input: CommentaryPolicyInput<'_>) -> CommentaryPolicyD
                 Topic::Objective,
             )
             .maybe_upgrade_stolen(stolen),
+            DetectedEvent::TowerDestroyed { .. } if event.is_high_value_tower() => decision(
+                true,
+                Priority::High,
+                Emotion::Excited,
+                NarrativeMode::ConfirmedEvent,
+                Topic::Objective,
+            ),
             DetectedEvent::TowerDestroyed { .. } => decision(
                 true,
                 Priority::Medium,
@@ -439,6 +453,93 @@ mod tests {
         assert!(!can_bypass_cooldown(&decision));
     }
 
+    #[test]
+    fn friendly_kill_is_high_priority() {
+        let events = vec![player_team_kill(1, true, false, false)];
+        let intent = confirmed_intent(Priority::High, Emotion::Excited, Topic::Kill);
+        let game_state = base_game_state();
+
+        let decision = decide_commentary_policy(input(&intent, &events, &game_state));
+
+        assert!(decision.should_commentary);
+        assert_eq!(decision.priority, Priority::High);
+        assert_eq!(decision.emotion, Emotion::Excited);
+        assert_eq!(decision.topic, Topic::Kill);
+        assert!(can_bypass_cooldown(&decision));
+    }
+
+    #[test]
+    fn ally_death_is_high_priority() {
+        let events = vec![player_team_kill(1, false, true, false)];
+        let intent = confirmed_intent(Priority::High, Emotion::Excited, Topic::Kill);
+        let game_state = base_game_state();
+
+        let decision = decide_commentary_policy(input(&intent, &events, &game_state));
+
+        assert!(decision.should_commentary);
+        assert_eq!(decision.priority, Priority::High);
+        assert!(events[0].is_ally_death());
+    }
+
+    #[test]
+    fn local_player_death_is_high_priority() {
+        let events = vec![player_team_kill(1, false, true, true)];
+        let intent = confirmed_intent(Priority::High, Emotion::Excited, Topic::Kill);
+        let game_state = base_game_state();
+
+        let decision = decide_commentary_policy(input(&intent, &events, &game_state));
+
+        assert!(decision.should_commentary);
+        assert_eq!(decision.priority, Priority::High);
+        assert!(events[0].is_local_player_death());
+        assert!(can_bypass_cooldown(&decision));
+    }
+
+    #[test]
+    fn high_value_tower_is_high_priority() {
+        let events = vec![high_tower(1)];
+        let intent = confirmed_intent(Priority::High, Emotion::Excited, Topic::Objective);
+        let game_state = base_game_state();
+
+        let decision = decide_commentary_policy(input(&intent, &events, &game_state));
+
+        assert_eq!(decision.priority, Priority::High);
+        assert_eq!(decision.topic, Topic::Objective);
+        assert!(decision.should_commentary);
+        assert!(can_bypass_cooldown(&decision));
+    }
+
+    #[test]
+    fn high_priority_kill_bypasses_cooldown() {
+        let mut policy = CommentaryPolicy::new();
+        let game_state = base_game_state();
+        let first_events = vec![player_team_kill(1, true, false, false)];
+        let first_intent = confirmed_intent(Priority::High, Emotion::Excited, Topic::Kill);
+        let first = policy.evaluate(input(&first_intent, &first_events, &game_state));
+        policy.note_emitted(&first);
+
+        let second_events = vec![player_team_kill(2, false, true, false)];
+        let second_intent = confirmed_intent(Priority::High, Emotion::Excited, Topic::Kill);
+        let second = policy.evaluate(input(&second_intent, &second_events, &game_state));
+
+        assert!(second.should_commentary);
+        assert!(!policy.is_in_cooldown(&second));
+    }
+
+    #[test]
+    fn medium_events_still_respect_cooldown() {
+        let mut policy = CommentaryPolicy::new();
+        let game_state = base_game_state();
+        let first_events = vec![champion_kill(1)];
+        let first_intent = confirmed_intent(Priority::Medium, Emotion::Excited, Topic::Kill);
+        let first = policy.evaluate(input(&first_intent, &first_events, &game_state));
+        policy.note_emitted(&first);
+
+        let visual = visual_intent(Emotion::Calm);
+        let second = policy.evaluate(input(&visual, &[], &game_state));
+        assert!(policy.is_in_cooldown(&second));
+    }
+
     fn input<'a>(
         intent: &'a NarrativeIntent,
         events: &'a [DetectedEvent],
@@ -476,11 +577,33 @@ mod tests {
     }
 
     fn champion_kill(event_id: u32) -> DetectedEvent {
+        player_team_kill(event_id, false, false, false)
+    }
+
+    fn player_team_kill(
+        event_id: u32,
+        killer_is_ally: bool,
+        victim_is_ally: bool,
+        victim_is_local_player: bool,
+    ) -> DetectedEvent {
         DetectedEvent::ChampionKilled {
             event_id: Some(event_id),
             event_time: Some(100.0),
             killer_name: Some("Ahri".to_string()),
             victim_name: Some("Jinx".to_string()),
+            assisters: Vec::new(),
+            killer_is_ally,
+            victim_is_ally,
+            victim_is_local_player,
+        }
+    }
+
+    fn high_tower(event_id: u32) -> DetectedEvent {
+        DetectedEvent::TowerDestroyed {
+            event_id: Some(event_id),
+            event_time: Some(100.0),
+            killer_name: Some("Ahri".to_string()),
+            turret_killed: Some("Turret_T1_C_01_A".to_string()),
             assisters: Vec::new(),
         }
     }
@@ -490,7 +613,7 @@ mod tests {
             event_id: Some(event_id),
             event_time: Some(100.0),
             killer_name: Some("Ahri".to_string()),
-            turret_killed: Some("Turret_T1_C_01_A".to_string()),
+            turret_killed: Some("Turret_T1_L_03_A".to_string()),
             assisters: Vec::new(),
         }
     }

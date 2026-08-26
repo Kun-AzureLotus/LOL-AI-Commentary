@@ -1,4 +1,4 @@
-pub fn run_launcher() {
+﻿pub fn run_launcher() {
     #[cfg(not(windows))]
     {
         eprintln!("[Launcher Error] Windows GUI is required");
@@ -24,7 +24,7 @@ mod windows_ui {
         DrawTextW, EndPaint, ExcludeClipRect, FillRect, FillRgn, GetDC, GetMonitorInfoW,
         GetTextExtentPoint32W, InvalidateRect, MonitorFromWindow, Polyline, PtInRect, RedrawWindow,
         ReleaseDC, RestoreDC, SaveDC, ScreenToClient, SelectObject, SetBkColor, SetBkMode,
-        SetTextColor,
+        SetTextColor, UpdateWindow,
         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, RDW_ALLCHILDREN, RDW_INVALIDATE, RDW_NOERASE, RDW_UPDATENOW,
         DEFAULT_CHARSET, DEFAULT_QUALITY, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
         DT_SINGLELINE,
@@ -37,6 +37,7 @@ mod windows_ui {
         SetWindowTheme, DRAWITEMSTRUCT, EM_SETLIMITTEXT, EM_SETSEL,
         EM_SETMARGINS, MEASUREITEMSTRUCT,
     };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumChildWindows,
         GetClientRect, GetCursorPos, GetMessageW, GetParent, GetSystemMetrics, GetWindowLongPtrW,
@@ -45,7 +46,8 @@ mod windows_ui {
         PostQuitMessage, RegisterClassW, SendMessageW, SetTimer, SetWindowLongPtrW, SetWindowPos,
         SetWindowTextW, ShowWindow, TranslateMessage, BN_CLICKED, BS_OWNERDRAW, CBS_DROPDOWNLIST,
         CBS_HASSTRINGS, GWLP_WNDPROC, UISF_HIDEFOCUS, UIS_SET, WM_CHANGEUISTATE, WM_UPDATEUISTATE,
-        CBS_OWNERDRAWFIXED, CB_ADDSTRING, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_SETCURSEL,
+        CBS_OWNERDRAWFIXED, CB_ADDSTRING, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT, CB_RESETCONTENT,
+        CB_SETCURSEL,
         CB_SETITEMHEIGHT, CBN_KILLFOCUS, CBN_SELCHANGE, CBN_SETFOCUS, CS_DBLCLKS, CS_HREDRAW,
         CS_VREDRAW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE,
         ES_NUMBER, ES_PASSWORD, ES_WANTRETURN, GWLP_USERDATA, HMENU, HTBOTTOM, HTBOTTOMLEFT,
@@ -69,14 +71,19 @@ mod windows_ui {
         snap_font_scale, to_colorref, Metrics, Palette, FONT_SCALE_DEFAULT, FONT_SCALES,
     };
     use crate::tts::{
-        list_installed_voices, sort_voices_for_selector, voice_selector_label, InstalledVoice,
+        list_installed_voices, preferred_free_voice_id,
+        sort_voices_for_selector, voice_selector_label, ElevenLabsVoice, InstalledVoice,
     };
 
     use super::super::{
-        apply_start, apply_started, apply_stop, apply_stop_requested, play_test_voice_text,
-        test_llm_connection, validate_volume, CommentaryLanguage, CommentaryStyle,
-        ConnectionProvider, GameType, LauncherConfig, LauncherStatus, PipelineSession, UiLanguage,
-        UiTheme, DEFAULT_CUSTOM_STYLE_PROMPT, MAX_CUSTOM_STYLE_PROMPT_CHARS, OPENROUTER_BASE_URL, SYSTEM_DEFAULT_VOICE,
+        apply_start, apply_started, apply_stop, apply_stop_requested, list_elevenlabs_voices,
+        play_elevenlabs_test_voice, play_test_voice_text, start_action_enabled, stop_action_enabled,
+        apply_app_volume_when_available, get_app_volume_percent, set_app_volume_percent,
+        test_llm_connection, validate_volume,
+        CommentaryLanguage, CommentaryStyle, ConnectionProvider, GameType, LauncherConfig,
+        LauncherStatus, PipelineSession, TtsProvider, UiLanguage, UiTheme,
+        DEFAULT_CUSTOM_STYLE_PROMPT, MAX_CUSTOM_STYLE_PROMPT_CHARS, OPENROUTER_BASE_URL,
+        SYSTEM_DEFAULT_VOICE,
     };
 
     const IDC_GAME: i32 = 101;
@@ -109,6 +116,11 @@ mod windows_ui {
     const IDC_COMMENTARY_LANG: i32 = 161;
     const IDC_THEME_DARK: i32 = 162;
     const IDC_THEME_LIGHT: i32 = 163;
+    const IDC_TTS_ENGINE: i32 = 164;
+    const IDC_EL_API_KEY: i32 = 165;
+    const IDC_EL_VOICE: i32 = 166;
+    const IDC_EL_MODEL: i32 = 167;
+    const IDC_EL_VOICE_ID: i32 = 168;
     const IDT_STATUS: usize = 1;
     const EC_BOTH_MARGINS: usize = 0x0001 | 0x0002;
     const ODS_COMBOBOXEDIT: u32 = 0x1000;
@@ -164,6 +176,11 @@ mod windows_ui {
         model: HWND,
         api_key: HWND,
         voice: HWND,
+        tts_engine: HWND,
+        el_api_key: HWND,
+        el_voice: HWND,
+        el_voice_id: HWND,
+        el_model: HWND,
         style: HWND,
         style_chips: [HWND; 5],
         scale_chips: [HWND; 4],
@@ -172,6 +189,7 @@ mod windows_ui {
         theme_dark: HWND,
         theme_light: HWND,
         volume: HWND,
+        label_app_volume: HWND,
         prompt: HWND,
         prompt_label: HWND,
         prompt_help: HWND,
@@ -198,21 +216,33 @@ mod windows_ui {
         label_model: HWND,
         label_api_key: HWND,
         label_voice: HWND,
+        label_tts_engine: HWND,
+        label_el_api_key: HWND,
+        label_el_voice_id: HWND,
+        label_el_model: HWND,
         label_volume: HWND,
         label_scale: HWND,
         voices: Vec<InstalledVoice>,
+        el_voices: Vec<ElevenLabsVoice>,
+        el_voices_loaded: bool,
         status_value: LauncherStatus,
         session: Option<PipelineSession>,
         note_text: Option<String>,
         focused: HWND,
         slider_rect: RECT,
+        app_slider_rect: RECT,
         prompt_count_rect: RECT,
         slider_drag: bool,
+        app_slider_drag: bool,
+        app_volume: u16,
+        app_volume_available: bool,
+        app_volume_pending: bool,
         sidebar_w: i32,
         settings_nav_w: i32,
         caption_hot: i32,
         hover_hwnd: HWND,
         last_status_sig: String,
+        status_pulse: bool,
         mem_dc: HDC,
         mem_bitmap: HBITMAP,
         mem_old: HGDIOBJ,
@@ -346,8 +376,16 @@ mod windows_ui {
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                let _ = ReleaseCapture();
                 if let Some(state) = ui_state(hwnd) {
+                    let persist_app = state.app_slider_drag && state.app_volume_available;
                     state.slider_drag = false;
+                    state.app_slider_drag = false;
+                    if persist_app {
+                        if let Ok(config) = read_config(state) {
+                            let _ = config.save_to_disk();
+                        }
+                    }
                 }
                 LRESULT(0)
             }
@@ -375,6 +413,12 @@ mod windows_ui {
                     if id == IDC_COMMENTARY_LANG as u32 {
                         on_commentary_language_combo(hwnd);
                     }
+                    if id == IDC_TTS_ENGINE as u32 {
+                        on_tts_engine_changed(hwnd);
+                    }
+                    if id == IDC_EL_VOICE as u32 {
+                        on_elevenlabs_voice_changed(hwnd);
+                    }
                     let _ = InvalidateRect(hwnd, None, false);
                 }
                 if code == EN_CHANGE as u32 && id == IDC_PROMPT as u32 {
@@ -395,6 +439,9 @@ mod windows_ui {
                     }
                     let _ = InvalidateRect(hwnd, None, false);
                     let _ = InvalidateRect(control, None, false);
+                    if code == EN_KILLFOCUS as u32 && id == IDC_EL_API_KEY as u32 {
+                        refresh_elevenlabs_voices(hwnd, true);
+                    }
                 }
                 if code == BN_CLICKED as u32 {
                     match id as i32 {
@@ -437,6 +484,14 @@ mod windows_ui {
             }
             WM_TIMER => {
                 if wparam.0 == IDT_STATUS {
+                    if let Some(state) = ui_state(hwnd) {
+                        if matches!(state.status_value, LauncherStatus::Starting) {
+                            state.status_pulse = !state.status_pulse;
+                        }
+                        if refresh_app_volume_state(state) {
+                            let _ = InvalidateRect(hwnd, None, false);
+                        }
+                    }
                     refresh_status_text(hwnd);
                 }
                 LRESULT(0)
@@ -653,9 +708,14 @@ mod windows_ui {
             state.model,
             state.api_key,
             state.voice,
+            state.tts_engine,
             state.style,
             state.volume,
             state.prompt,
+            state.el_api_key,
+            state.el_voice,
+            state.el_voice_id,
+            state.el_model,
         ]);
         for child in children {
             exclude_child_rect(parent, hdc, child);
@@ -960,8 +1020,8 @@ mod windows_ui {
         );
     }
 
-    fn form_fields(state: &UiState) -> [HWND; 8] {
-        [
+    fn form_fields(state: &UiState) -> Vec<HWND> {
+        vec![
             state.game,
             state.provider,
             state.ui_lang,
@@ -970,6 +1030,11 @@ mod windows_ui {
             state.model,
             state.api_key,
             state.voice,
+            state.tts_engine,
+            state.el_api_key,
+            state.el_voice,
+            state.el_voice_id,
+            state.el_model,
         ]
     }
 
@@ -1089,6 +1154,18 @@ mod windows_ui {
             },
             pal(state).border,
         );
+        if pal(state).paper_ornaments || pal(state).ink_ornaments {
+            crate::launcher::oriental_background::paint_landscape(
+                hdc,
+                RECT {
+                    left: state.sidebar_w + 1,
+                    top: state.metrics.title_bar_h,
+                    right: client.right,
+                    bottom: client.bottom,
+                },
+                pal(state),
+            );
+        }
         if !IsZoomed(hwnd).as_bool() {
             fill_color(
                 hdc,
@@ -1150,7 +1227,7 @@ mod windows_ui {
             Page::Settings => paint_settings_chrome(hdc, state, content_x),
         }
         if state.page == Page::Settings && state.settings_section == SettingsSection::Voice {
-            paint_slider(hdc, state);
+            paint_volume_sliders(hdc, state);
         }
     }
 
@@ -1346,7 +1423,7 @@ mod windows_ui {
             rect.top + 20,
             rect.left + 30,
             rect.top + 28,
-            pal(state).green,
+            hero_indicator_color(state),
         );
 
         SelectObject(hdc, state.fonts.small);
@@ -1373,8 +1450,20 @@ mod windows_ui {
         );
 
         let waiting = match &state.status_value {
-            LauncherStatus::Running => "",
-            LauncherStatus::Error(message) => message.as_str(),
+            LauncherStatus::Running => state
+                .session
+                .as_ref()
+                .and_then(|session| session.tts_hint().status_line())
+                .unwrap_or(""),
+            LauncherStatus::Starting => s.start_starting,
+            LauncherStatus::Stopping => s.stop_stopping,
+            LauncherStatus::Error(message) => {
+                if message.is_empty() {
+                    s.start_failed_hint
+                } else {
+                    message.as_str()
+                }
+            }
             _ => s.waiting,
         };
         if !waiting.is_empty() {
@@ -1508,16 +1597,17 @@ mod windows_ui {
             title,
         );
         if state.settings_section == SettingsSection::Voice {
-            SelectObject(hdc, state.fonts.status);
-            SetTextColor(hdc, COLORREF(to_colorref(pal(state).text)));
-            let volume = edit_text(state.volume);
-            draw_left_text(
+            let app_label = if state.app_volume_available {
+                format!("{}%", state.app_volume)
+            } else {
+                state.ui_language.strings().app_volume_unavailable.to_string()
+            };
+            paint_slider_value(hdc, state, state.app_slider_rect, app_label);
+            paint_slider_value(
                 hdc,
-                state.slider_rect.right + 16,
-                state.slider_rect.top - 4,
-                80,
-                m.status + 4,
-                &format!("{volume}%"),
+                state,
+                state.slider_rect,
+                format!("{}%", edit_text(state.volume)),
             );
         }
         if state.settings_section == SettingsSection::Style {
@@ -1623,15 +1713,36 @@ mod windows_ui {
         );
     }
 
-    unsafe fn paint_slider(hdc: HDC, state: &UiState) {
-        let rect = state.slider_rect;
+    unsafe fn paint_slider_value(hdc: HDC, state: &UiState, rect: RECT, value: String) {
         if rect.right <= rect.left {
             return;
         }
-        let volume = edit_text(state.volume)
+        SelectObject(hdc, state.fonts.status);
+        SetTextColor(hdc, COLORREF(to_colorref(pal(state).text)));
+        draw_left_text(
+            hdc,
+            rect.right + 16,
+            rect.top - 4,
+            if value.len() > 8 { 220 } else { 80 },
+            state.metrics.status + 4,
+            &value,
+        );
+    }
+
+    unsafe fn paint_volume_sliders(hdc: HDC, state: &UiState) {
+        paint_volume_slider(hdc, state, state.app_slider_rect, state.app_volume as i32);
+        let tts_volume = edit_text(state.volume)
             .parse::<i32>()
             .unwrap_or(80)
             .clamp(0, 100);
+        paint_volume_slider(hdc, state, state.slider_rect, tts_volume);
+    }
+
+    unsafe fn paint_volume_slider(hdc: HDC, state: &UiState, rect: RECT, volume: i32) {
+        if rect.right <= rect.left {
+            return;
+        }
+        let volume = volume.clamp(0, 100);
         let y = (rect.top + rect.bottom) / 2;
         fill_color(
             hdc,
@@ -1654,7 +1765,12 @@ mod windows_ui {
             },
             pal(state).green,
         );
-        fill_ellipse(hdc, filled - 7, y - 7, filled + 7, y + 7, pal(state).paper);
+        let thumb = if state.theme == UiTheme::Dark {
+            pal(state).paper
+        } else {
+            pal(state).text
+        };
+        fill_ellipse(hdc, filled - 7, y - 7, filled + 7, y + 7, thumb);
     }
 
     unsafe fn fill_color(hdc: HDC, rect: RECT, color: (u8, u8, u8)) {
@@ -1762,13 +1878,19 @@ mod windows_ui {
     fn status_values(state: &UiState) -> (String, String, String, String) {
         let s = state.ui_language.strings();
         let hero = match &state.status_value {
-            LauncherStatus::Ready | LauncherStatus::Stopped => s.ready,
-            LauncherStatus::Starting => s.starting,
-            LauncherStatus::Running => s.active,
-            LauncherStatus::Stopping => s.stopping,
-            LauncherStatus::Error(_) => s.not_connected,
-        }
-        .to_string();
+            LauncherStatus::Ready | LauncherStatus::Stopped => s.ready.to_string(),
+            LauncherStatus::Starting => s.starting.to_string(),
+            LauncherStatus::Running => s.start_running.to_string(),
+            LauncherStatus::Stopping => s.stopping.to_string(),
+            LauncherStatus::Error(message) => {
+                let mapped = state.ui_language.start_error_text(message);
+                if mapped.contains("ElevenLabs API Key") {
+                    mapped
+                } else {
+                    s.start_failed.to_string()
+                }
+            }
+        };
         let (ai, obs) = if let Some(session) = &state.session {
             (
                 match session.ai_hint() {
@@ -1854,6 +1976,9 @@ mod windows_ui {
             || control.0 == state.model.0
             || control.0 == state.api_key.0
             || control.0 == state.volume.0
+            || control.0 == state.el_api_key.0
+            || control.0 == state.el_voice_id.0
+            || control.0 == state.el_model.0
         {
             let (focused, hovered) = field_active(state, control);
             let fill = field_fill(pal(state), focused, hovered);
@@ -1874,6 +1999,7 @@ mod windows_ui {
         if matches!(
             id,
             IDC_GAME | IDC_PROVIDER | IDC_VOICE | IDC_STYLE | IDC_UI_LANG | IDC_COMMENTARY_LANG
+                | IDC_TTS_ENGINE | IDC_EL_VOICE
         ) {
             draw_combo_item(hwnd, draw);
             return;
@@ -1978,7 +2104,11 @@ mod windows_ui {
         let Some(state) = ui_state(hwnd) else {
             return;
         };
-        let hot = if is_settings_nav(id) {
+        let locked = (id == IDC_START && !start_action_enabled(&state.status_value))
+            || (id == IDC_STOP && !stop_action_enabled(&state.status_value));
+        let hot = if locked {
+            false
+        } else if is_settings_nav(id) {
             state.hover_hwnd.0 == draw.hwndItem.0
         } else {
             let mut cursor = POINT::default();
@@ -1987,7 +2117,7 @@ mod windows_ui {
             let _ = GetWindowRect(draw.hwndItem, &mut screen);
             PtInRect(&screen, cursor).as_bool()
         };
-        let pressed = if is_settings_nav(id) {
+        let pressed = if locked || is_settings_nav(id) {
             false
         } else {
             draw.itemState.0 & 1 != 0
@@ -2054,7 +2184,7 @@ mod windows_ui {
             return;
         }
         SelectObject(draw.hDC, state.fonts.button);
-        let mut wide_text = wide(button_label(id, state.ui_language));
+        let mut wide_text = wide(button_label(id, state));
         let nav = matches!(
             id,
             IDC_NAV_HOME
@@ -2124,7 +2254,7 @@ mod windows_ui {
         SelectObject(draw.hDC, state.fonts.button);
         SetBkMode(draw.hDC, TRANSPARENT);
         SetTextColor(draw.hDC, COLORREF(to_colorref(preview.text)));
-        let mut label = wide(button_label(id, state.ui_language));
+        let mut label = wide(button_label(id, state));
         let mut text_rect = RECT {
             left: draw.rcItem.left + 14,
             top: swatch_y + swatch_h + 6,
@@ -2146,23 +2276,10 @@ mod windows_ui {
         pressed: bool,
     ) -> ((u8, u8, u8), (u8, u8, u8), (u8, u8, u8), bool) {
         if id == IDC_START {
-            let fill = if pressed {
-                pal(state).vermilion_deep
-            } else if hot {
-                pal(state).vermilion_hover
-            } else {
-                pal(state).vermilion
-            };
-            return (fill, fill, pal(state).text, false);
+            return start_button_colors(state, hot, pressed);
         }
         if id == IDC_STOP {
-            if pressed {
-                return (pal(state).vermilion_deep, pal(state).vermilion_deep, pal(state).text, false);
-            }
-            if hot {
-                return (pal(state).vermilion, pal(state).vermilion, pal(state).text, false);
-            }
-            return (pal(state).surface, pal(state).surface, pal(state).text_muted, false);
+            return stop_button_colors(state, hot, pressed);
         }
         if matches!(id, IDC_TEST_CONN | IDC_TEST_VOICE) {
             if pressed {
@@ -2237,11 +2354,98 @@ mod windows_ui {
         (fill, pal(state).border, pal(state).text, false)
     }
 
-    fn button_label(id: i32, lang: UiLanguage) -> &'static str {
-        let s = lang.strings();
+    fn hero_indicator_color(state: &UiState) -> (u8, u8, u8) {
+        match &state.status_value {
+            LauncherStatus::Ready => pal(state).green_deep,
+            LauncherStatus::Starting | LauncherStatus::Stopping => pal(state).gold,
+            LauncherStatus::Running => pal(state).green,
+            LauncherStatus::Stopped => pal(state).text_muted,
+            LauncherStatus::Error(_) => pal(state).vermilion,
+        }
+    }
+
+    fn start_button_colors(
+        state: &UiState,
+        hot: bool,
+        pressed: bool,
+    ) -> ((u8, u8, u8), (u8, u8, u8), (u8, u8, u8), bool) {
+        match &state.status_value {
+            LauncherStatus::Starting => {
+                let fill = pal(state).gold;
+                (fill, fill, pal(state).text, false)
+            }
+            LauncherStatus::Running | LauncherStatus::Stopping => {
+                (pal(state).green_deep, pal(state).green_deep, pal(state).text, false)
+            }
+            LauncherStatus::Error(_) | LauncherStatus::Ready | LauncherStatus::Stopped => {
+                let fill = if pressed {
+                    pal(state).vermilion_deep
+                } else if hot {
+                    pal(state).vermilion_hover
+                } else {
+                    pal(state).vermilion
+                };
+                (fill, fill, pal(state).text, false)
+            }
+        }
+    }
+
+    fn stop_button_colors(
+        state: &UiState,
+        hot: bool,
+        pressed: bool,
+    ) -> ((u8, u8, u8), (u8, u8, u8), (u8, u8, u8), bool) {
+        if !stop_action_enabled(&state.status_value) {
+            return (
+                pal(state).surface,
+                pal(state).surface,
+                pal(state).text_muted,
+                false,
+            );
+        }
+        if matches!(state.status_value, LauncherStatus::Stopping) {
+            return (
+                pal(state).surface,
+                pal(state).border,
+                pal(state).text_muted,
+                false,
+            );
+        }
+        if pressed {
+            return (
+                pal(state).vermilion_deep,
+                pal(state).vermilion_deep,
+                pal(state).text,
+                false,
+            );
+        }
+        if hot {
+            return (pal(state).vermilion, pal(state).vermilion, pal(state).text, false);
+        }
+        (
+            pal(state).elevated,
+            pal(state).green_deep,
+            pal(state).text,
+            false,
+        )
+    }
+
+    fn button_label(id: i32, state: &UiState) -> &'static str {
+        let s = state.ui_language.strings();
         match id {
-            IDC_START => s.start,
-            IDC_STOP => s.stop,
+            IDC_START => match &state.status_value {
+                LauncherStatus::Starting => s.start_starting,
+                LauncherStatus::Running | LauncherStatus::Stopping => s.start_running,
+                LauncherStatus::Error(_) => s.start_retry,
+                LauncherStatus::Ready | LauncherStatus::Stopped => s.start,
+            },
+            IDC_STOP => {
+                if matches!(state.status_value, LauncherStatus::Stopping) {
+                    s.stop_stopping
+                } else {
+                    s.stop
+                }
+            }
             IDC_TEST_CONN => s.test_conn,
             IDC_TEST_VOICE => s.test_voice,
             IDC_SAVE => s.save,
@@ -2256,7 +2460,7 @@ mod windows_ui {
             IDC_THEME_DARK => s.theme_dark,
             IDC_THEME_LIGHT => s.theme_light,
             id if (IDC_STYLE_CHIP..IDC_STYLE_CHIP + 5).contains(&id) => {
-                lang.style_title(style_chip_label(id))
+                state.ui_language.style_title(style_chip_label(id))
             }
             id if (IDC_SCALE_CHIP..IDC_SCALE_CHIP + 4).contains(&id) => scale_chip_label(id),
             _ => "",
@@ -2304,6 +2508,17 @@ mod windows_ui {
             IDC_API_KEY,
         )?;
         let voice = combo_box(hwnd, instance, combo, IDC_VOICE)?;
+        let tts_engine = combo_box(hwnd, instance, combo, IDC_TTS_ENGINE)?;
+        let el_api_key = edit_box(
+            hwnd,
+            instance,
+            edit | WINDOW_STYLE(ES_PASSWORD as u32),
+            "",
+            IDC_EL_API_KEY,
+        )?;
+        let el_voice = combo_box(hwnd, instance, combo, IDC_EL_VOICE)?;
+        let el_voice_id = edit_box(hwnd, instance, edit, "", IDC_EL_VOICE_ID)?;
+        let el_model = edit_box(hwnd, instance, edit, "", IDC_EL_MODEL)?;
         let style = combo_box(hwnd, instance, combo, IDC_STYLE)?;
         let volume = edit_box(
             hwnd,
@@ -2379,6 +2594,18 @@ mod windows_ui {
             SendMessageW(voice, CB_SETCURSEL, WPARAM(index), LPARAM(0));
         }
 
+        for item in TtsProvider::all() {
+            add_combo_string(tts_engine, item.label());
+        }
+        select_combo(tts_engine, saved.tts_provider.label());
+        set_text(el_voice_id, &saved.elevenlabs_voice_id);
+        set_text(el_model, &saved.elevenlabs_model);
+        let pending = saved.app_volume.min(100);
+        let (app_volume, app_volume_available, app_volume_pending) = match get_app_volume_percent() {
+            Ok(volume) => (volume, true, false),
+            Err(_) => (pending, false, true),
+        };
+
         let ui_lang = combo_box(hwnd, instance, combo, IDC_UI_LANG)?;
         for item in UiLanguage::all() {
             add_combo_string(ui_lang, item.combo_label());
@@ -2428,6 +2655,11 @@ mod windows_ui {
             model,
             api_key,
             voice,
+            tts_engine,
+            el_api_key,
+            el_voice,
+            el_voice_id,
+            el_model,
             style,
             style_chips,
             scale_chips,
@@ -2436,6 +2668,7 @@ mod windows_ui {
             theme_dark: owner_button(hwnd, instance, IDC_THEME_DARK)?,
             theme_light: owner_button(hwnd, instance, IDC_THEME_LIGHT)?,
             volume,
+            label_app_volume: label(hwnd, instance, strings.app_volume, 0)?,
             prompt,
             prompt_label: label(hwnd, instance, strings.prompt_title, 0)?,
             prompt_help: label(hwnd, instance, strings.prompt_help, IDC_PROMPT_HELP)?,
@@ -2462,19 +2695,31 @@ mod windows_ui {
             label_model: label(hwnd, instance, strings.model, 0)?,
             label_api_key: label(hwnd, instance, strings.api_key, 0)?,
             label_voice: label(hwnd, instance, strings.voice, 0)?,
-            label_volume: label(hwnd, instance, strings.volume, 0)?,
+            label_tts_engine: label(hwnd, instance, strings.tts_engine, 0)?,
+            label_el_api_key: label(hwnd, instance, strings.api_key, 0)?,
+            label_el_voice_id: label(hwnd, instance, strings.voice_id, 0)?,
+            label_el_model: label(hwnd, instance, strings.model, 0)?,
+            label_volume: label(hwnd, instance, strings.tts_volume, 0)?,
             label_scale: label(hwnd, instance, strings.interface_scale, 0)?,
             voices,
+            el_voices: Vec::new(),
+            el_voices_loaded: false,
             status_value: LauncherStatus::Ready,
             session: None,
             note_text: None,
             focused: HWND::default(),
             slider_rect: RECT::default(),
+            app_slider_rect: RECT::default(),
             prompt_count_rect: RECT::default(),
             slider_drag: false,
+            app_slider_drag: false,
+            app_volume,
+            app_volume_available,
+            app_volume_pending,
             caption_hot: 0,
             hover_hwnd: HWND::default(),
             last_status_sig: String::new(),
+            status_pulse: false,
             mem_dc: HDC::default(),
             mem_bitmap: HBITMAP::default(),
             mem_old: HGDIOBJ::default(),
@@ -2706,6 +2951,7 @@ mod windows_ui {
         let ai = settings && state.settings_section == SettingsSection::Ai;
         let style = settings && state.settings_section == SettingsSection::Style;
         let voice = settings && state.settings_section == SettingsSection::Voice;
+        let elevenlabs = combo_text(state.tts_engine) == TtsProvider::ElevenLabs.label();
         let custom = combo_text(state.style) == CommentaryStyle::Custom.label();
         let combo_drop = 240;
 
@@ -2748,8 +2994,18 @@ mod windows_ui {
         show(state.prompt, style && custom);
         show(state.reset, style && custom);
         show(state.save, style && custom);
+        show(state.label_tts_engine, voice);
+        show(state.tts_engine, voice);
         show(state.label_voice, voice);
-        show(state.voice, voice);
+        show(state.voice, voice && !elevenlabs);
+        show(state.label_el_api_key, voice && elevenlabs);
+        show(state.el_api_key, voice && elevenlabs);
+        show(state.el_voice, voice && elevenlabs);
+        show(state.label_el_voice_id, voice && elevenlabs);
+        show(state.el_voice_id, voice && elevenlabs);
+        show(state.label_el_model, voice && elevenlabs);
+        show(state.el_model, voice && elevenlabs);
+        show(state.label_app_volume, voice);
         show(state.label_volume, voice);
         show(state.volume, false);
         show(state.test_conn, home || ai);
@@ -2922,10 +3178,45 @@ mod windows_ui {
                 }
             }
             if voice {
-                move_hwnd(state.label_voice, field_x, y, field_w, m.label + 4);
+                if !state.app_slider_drag {
+                    let _ = refresh_app_volume_state(state);
+                }
+                move_hwnd(state.label_tts_engine, field_x, y, field_w, m.label + 4);
                 y += m.label + m.label_gap;
-                move_hwnd(state.voice, field_x, y, field_w.min(560), combo_drop);
-                y += m.input_h + m.field_gap + 12;
+                move_hwnd(state.tts_engine, field_x, y, field_w.min(560), combo_drop);
+                y += m.input_h + m.field_gap + 8;
+                if elevenlabs {
+                    move_hwnd(state.label_el_api_key, field_x, y, field_w, m.label + 4);
+                    y += m.label + m.label_gap;
+                    move_hwnd(state.el_api_key, field_x, y, field_w.min(560), m.input_h);
+                    y += m.input_h + m.field_gap;
+                    move_hwnd(state.label_voice, field_x, y, field_w, m.label + 4);
+                    y += m.label + m.label_gap;
+                    move_hwnd(state.el_voice, field_x, y, field_w.min(560), combo_drop);
+                    y += m.input_h + m.field_gap;
+                    move_hwnd(state.label_el_voice_id, field_x, y, field_w, m.label + 4);
+                    y += m.label + m.label_gap;
+                    move_hwnd(state.el_voice_id, field_x, y, field_w.min(560), m.input_h);
+                    y += m.input_h + m.field_gap;
+                    move_hwnd(state.label_el_model, field_x, y, field_w, m.label + 4);
+                    y += m.label + m.label_gap;
+                    move_hwnd(state.el_model, field_x, y, field_w.min(560), m.input_h);
+                    y += m.input_h + m.field_gap;
+                } else {
+                    move_hwnd(state.label_voice, field_x, y, field_w, m.label + 4);
+                    y += m.label + m.label_gap;
+                    move_hwnd(state.voice, field_x, y, field_w.min(560), combo_drop);
+                    y += m.input_h + m.field_gap + 12;
+                }
+                move_hwnd(state.label_app_volume, field_x, y, field_w, m.label + 4);
+                y += m.label + m.label_gap + 8;
+                state.app_slider_rect = RECT {
+                    left: field_x,
+                    top: y,
+                    right: field_x + field_w.min(420),
+                    bottom: y + 24,
+                };
+                y += 40;
                 move_hwnd(state.label_volume, field_x, y, field_w, m.label + 4);
                 y += m.label + m.label_gap + 8;
                 state.slider_rect = RECT {
@@ -2939,6 +3230,7 @@ mod windows_ui {
                 move_hwnd(state.note, field_x, y + m.button_h + 10, field_w, m.status + 8);
             } else {
                 state.slider_rect = RECT::default();
+                state.app_slider_rect = RECT::default();
             }
             if !(style && custom) {
                 state.prompt_count_rect = RECT::default();
@@ -2949,6 +3241,8 @@ mod windows_ui {
             state.game,
             state.provider,
             state.voice,
+            state.tts_engine,
+            state.el_voice,
             state.style,
             state.ui_lang,
             state.commentary_lang,
@@ -2978,6 +3272,9 @@ mod windows_ui {
             state.api_key,
             state.volume,
             state.prompt,
+            state.el_api_key,
+            state.el_voice_id,
+            state.el_model,
         ] {
             SendMessageW(
                 edit,
@@ -3004,7 +3301,12 @@ mod windows_ui {
             state.label_model,
             state.label_api_key,
             state.label_voice,
+            state.label_tts_engine,
+            state.label_el_api_key,
+            state.label_el_voice_id,
+            state.label_el_model,
             state.label_volume,
+            state.label_app_volume,
             state.label_scale,
             state.prompt_help,
         ] {
@@ -3072,6 +3374,7 @@ mod windows_ui {
         }
         apply_visual_metrics(hwnd);
         paint_settings_nav_now(hwnd);
+        refresh_elevenlabs_voices(hwnd, false);
     }
 
     unsafe fn set_ui_language(hwnd: HWND, lang: UiLanguage) {
@@ -3204,7 +3507,12 @@ mod windows_ui {
         set_text(state.label_model, s.model);
         set_text(state.label_api_key, s.api_key);
         set_text(state.label_voice, s.voice);
-        set_text(state.label_volume, s.volume);
+        set_text(state.label_tts_engine, s.tts_engine);
+        set_text(state.label_el_api_key, s.api_key);
+        set_text(state.label_el_voice_id, s.voice_id);
+        set_text(state.label_el_model, s.model);
+        set_text(state.label_volume, s.tts_volume);
+        set_text(state.label_app_volume, s.app_volume);
         set_text(state.prompt_label, s.prompt_title);
         set_text(state.prompt_help, s.prompt_help);
     }
@@ -3245,6 +3553,39 @@ mod windows_ui {
         apply_visual_metrics(hwnd);
     }
 
+    fn slider_contains(rect: RECT, x: i32, y: i32) -> bool {
+        rect.right > rect.left
+            && x >= rect.left - 4
+            && x <= rect.right + 4
+            && y >= rect.top - 8
+            && y <= rect.bottom + 8
+    }
+
+    fn slider_percent(rect: RECT, x: i32) -> i32 {
+        let span = (rect.right - rect.left).max(1);
+        (((x - rect.left) * 100) / span).clamp(0, 100)
+    }
+
+    unsafe fn refresh_app_volume_state(state: &mut UiState) -> bool {
+        match get_app_volume_percent() {
+            Ok(volume) => {
+                let changed = !state.app_volume_available || state.app_volume != volume;
+                state.app_volume = volume;
+                state.app_volume_available = true;
+                state.app_volume_pending = false;
+                changed
+            }
+            Err(_) => {
+                if state.app_volume_available {
+                    state.app_volume_available = false;
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+    }
+
     unsafe fn on_slider_mouse(hwnd: HWND, lparam: LPARAM, down: bool) {
         let x = (lparam.0 as i32) & 0xffff;
         let y = ((lparam.0 as i32) >> 16) & 0xffff;
@@ -3256,23 +3597,37 @@ mod windows_ui {
         if state.page != Page::Settings || state.settings_section != SettingsSection::Voice {
             return;
         }
-        let rect = state.slider_rect;
-        let inside = x >= rect.left - 4
-            && x <= rect.right + 4
-            && y >= rect.top - 8
-            && y <= rect.bottom + 8;
+        let tts_rect = state.slider_rect;
+        let app_rect = state.app_slider_rect;
         if down {
-            if !inside {
+            if slider_contains(app_rect, x, y) {
+                state.app_slider_drag = true;
+                state.slider_drag = false;
+                let _ = SetCapture(hwnd);
+            } else if slider_contains(tts_rect, x, y) {
+                state.slider_drag = true;
+                state.app_slider_drag = false;
+                let _ = SetCapture(hwnd);
+            } else {
                 return;
             }
-            state.slider_drag = true;
-        } else if !state.slider_drag {
+        }
+        if state.app_slider_drag {
+            state.app_volume = slider_percent(app_rect, x) as u16;
+            if set_app_volume_percent(state.app_volume).is_ok() {
+                state.app_volume_available = true;
+                state.app_volume_pending = false;
+            } else {
+                state.app_volume_available = false;
+                state.app_volume_pending = true;
+            }
+            let _ = InvalidateRect(hwnd, None, false);
             return;
         }
-        let span = (rect.right - rect.left).max(1);
-        let volume = (((x - rect.left) * 100) / span).clamp(0, 100);
-        set_text(state.volume, &volume.to_string());
-        let _ = InvalidateRect(hwnd, None, false);
+        if state.slider_drag {
+            set_text(state.volume, &slider_percent(tts_rect, x).to_string());
+            let _ = InvalidateRect(hwnd, None, false);
+        }
     }
 
     fn wide(text: &str) -> Vec<u16> {
@@ -3346,6 +3701,15 @@ mod windows_ui {
         let _ = SetWindowTextW(hwnd, &HSTRING::from(text));
     }
 
+    fn nonempty_or_default(value: &str, fallback: &str) -> String {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            fallback.to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
     unsafe fn on_provider_changed(hwnd: HWND) {
         let Some(state) = ui_state(hwnd) else {
             return;
@@ -3359,6 +3723,139 @@ mod windows_ui {
 
     unsafe fn on_style_changed(hwnd: HWND) {
         apply_visual_metrics(hwnd);
+    }
+
+    unsafe fn on_tts_engine_changed(hwnd: HWND) {
+        apply_visual_metrics(hwnd);
+        if let Some(state) = ui_state(hwnd) {
+            match read_config(state) {
+                Ok(config) => {
+                    let _ = config.save_to_disk();
+                }
+                Err(_) => {
+                    let mut config = LauncherConfig::load_from_disk();
+                    config.tts_provider = TtsProvider::from_label(&combo_text(state.tts_engine))
+                        .unwrap_or_default();
+                    let _ = config.save_to_disk();
+                }
+            }
+        }
+        refresh_elevenlabs_voices(hwnd, true);
+    }
+
+    unsafe fn on_elevenlabs_voice_changed(hwnd: HWND) {
+        let Some(state) = ui_state(hwnd) else {
+            return;
+        };
+        let voice_id = selected_elevenlabs_dropdown_id(state);
+        if !voice_id.is_empty() {
+            set_text(state.el_voice_id, &voice_id);
+        }
+    }
+
+    unsafe fn refresh_elevenlabs_voices(hwnd: HWND, force: bool) {
+        let preferred = {
+            let Some(state) = ui_state(hwnd) else {
+                return;
+            };
+            if combo_text(state.tts_engine) != TtsProvider::ElevenLabs.label() {
+                return;
+            }
+            if !force && state.el_voices_loaded {
+                return;
+            }
+            edit_text(state.el_voice_id)
+        };
+        let session_key = {
+            let Some(state) = ui_state(hwnd) else {
+                return;
+            };
+            let key = edit_text(state.el_api_key);
+            if key.is_empty() {
+                None
+            } else {
+                Some(key)
+            }
+        };
+        match list_elevenlabs_voices(session_key.as_deref()) {
+            Ok(voices) => {
+                if let Some(state) = ui_state(hwnd) {
+                    populate_elevenlabs_voice_combo(state, voices, &preferred);
+                }
+            }
+            Err(_) => {
+                if let Some(state) = ui_state(hwnd) {
+                    if session_key.is_some() {
+                        state.el_voices_loaded = true;
+                    }
+                }
+            }
+        }
+        let _ = InvalidateRect(hwnd, None, false);
+    }
+
+    unsafe fn populate_elevenlabs_voice_combo(
+        state: &mut UiState,
+        voices: Vec<ElevenLabsVoice>,
+        preferred: &str,
+    ) {
+        SendMessageW(state.el_voice, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
+        state.el_voices = voices;
+        state.el_voices_loaded = true;
+        SendMessageW(
+            state.el_voice,
+            CB_SETITEMHEIGHT,
+            WPARAM(usize::MAX),
+            LPARAM(state.metrics.input_h as isize),
+        );
+        SendMessageW(
+            state.el_voice,
+            CB_SETITEMHEIGHT,
+            WPARAM(0),
+            LPARAM((state.metrics.input_h - 8) as isize),
+        );
+        for voice in &state.el_voices {
+            add_combo_string(state.el_voice, &voice.combo_label());
+        }
+        if state.el_voices.is_empty() {
+            return;
+        }
+        let preferred = preferred.trim();
+        let index = state
+            .el_voices
+            .iter()
+            .position(|voice| voice.voice_id == preferred)
+            .or_else(|| {
+                preferred_free_voice_id(&state.el_voices).and_then(|id| {
+                    state
+                        .el_voices
+                        .iter()
+                        .position(|voice| voice.voice_id == id)
+                })
+            })
+            .unwrap_or(0);
+        SendMessageW(state.el_voice, CB_SETCURSEL, WPARAM(index), LPARAM(0));
+        if let Some(voice) = state.el_voices.get(index) {
+            set_text(state.el_voice_id, &voice.voice_id);
+        }
+    }
+
+    unsafe fn selected_elevenlabs_dropdown_id(state: &UiState) -> String {
+        let index = SendMessageW(state.el_voice, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0;
+        if index >= 0 {
+            if let Some(voice) = state.el_voices.get(index as usize) {
+                return voice.voice_id.clone();
+            }
+        }
+        String::new()
+    }
+
+    unsafe fn selected_elevenlabs_voice_id(state: &UiState) -> String {
+        let dropdown = selected_elevenlabs_dropdown_id(state);
+        if !dropdown.is_empty() {
+            return dropdown;
+        }
+        edit_text(state.el_voice_id).trim().to_string()
     }
 
     unsafe fn on_start(hwnd: HWND) {
@@ -3380,12 +3877,14 @@ mod windows_ui {
             return;
         }
         set_status(hwnd, LauncherStatus::Starting, None);
+        paint_lifecycle_now(hwnd);
         let api_key = edit_text(state.api_key);
         let config = match read_config(state) {
             Ok(config) => config,
             Err(error) => {
-                set_status(hwnd, LauncherStatus::Error(error.clone()), None);
-                popup(hwnd, &error);
+                let display = state.ui_language.start_error_text(&error);
+                set_status(hwnd, LauncherStatus::Error(display.clone()), None);
+                popup(hwnd, &display);
                 return;
             }
         };
@@ -3394,14 +3893,21 @@ mod windows_ui {
         } else {
             Some(api_key)
         };
-        match PipelineSession::start(config, session_key) {
+        let el_api_key = edit_text(state.el_api_key);
+        let elevenlabs_key = if el_api_key.is_empty() {
+            None
+        } else {
+            Some(el_api_key)
+        };
+        match PipelineSession::start(config, session_key, elevenlabs_key) {
             Ok(session) => {
                 state.session = Some(session);
                 set_status(hwnd, apply_started(LauncherStatus::Starting), None);
             }
             Err(error) => {
-                set_status(hwnd, LauncherStatus::Error(error.clone()), None);
-                popup(hwnd, &error);
+                let display = state.ui_language.start_error_text(&error);
+                set_status(hwnd, LauncherStatus::Error(display.clone()), None);
+                popup(hwnd, &display);
             }
         }
     }
@@ -3419,7 +3925,11 @@ mod windows_ui {
             }
             return;
         };
-        set_status(hwnd, apply_stop_requested(LauncherStatus::Running), None);
+        if !stop_action_enabled(&state.status_value) {
+            return;
+        }
+        set_status(hwnd, apply_stop_requested(state.status_value.clone()), None);
+        paint_lifecycle_now(hwnd);
         match session.stop() {
             Ok(()) => {
                 state.session = None;
@@ -3469,11 +3979,34 @@ mod windows_ui {
                 return;
             }
         };
-        if let Err(error) = play_test_voice_text(
-            config.to_tts_config(),
-            config.commentary_language.test_voice_text(),
-        ) {
+        let result = if config.tts_provider == TtsProvider::ElevenLabs {
+            let session_key = edit_text(state.el_api_key);
+            play_elevenlabs_test_voice(
+                if session_key.is_empty() {
+                    None
+                } else {
+                    Some(session_key.as_str())
+                },
+                &selected_elevenlabs_voice_id(state),
+                &config.elevenlabs_model,
+                state.ui_language.elevenlabs_test_voice_text(),
+                state.ui_language,
+            )
+        } else {
+            play_test_voice_text(
+                config.to_tts_config(),
+                state.ui_language.test_voice_text(),
+            )
+        };
+        if let Err(error) = result {
             popup(hwnd, &error);
+            return;
+        }
+        if state.app_volume_pending {
+            let percent = state.app_volume.min(100);
+            std::thread::spawn(move || {
+                let _ = apply_app_volume_when_available(percent, 40, 50);
+            });
         }
     }
 
@@ -3556,6 +4089,14 @@ mod windows_ui {
             ui_language: state.ui_language,
             commentary_language: state.commentary_language,
             theme: state.theme,
+            tts_provider: TtsProvider::from_label(&combo_text(state.tts_engine))
+                .unwrap_or_default(),
+            elevenlabs_voice_id: selected_elevenlabs_voice_id(state),
+            elevenlabs_model: nonempty_or_default(
+                &edit_text(state.el_model),
+                crate::tts::DEFAULT_ELEVENLABS_MODEL,
+            ),
+            app_volume: state.app_volume.min(100),
         };
         if style == CommentaryStyle::Custom {
             config.custom_style_prompt =
@@ -3565,12 +4106,47 @@ mod windows_ui {
     }
 
     unsafe fn set_status(hwnd: HWND, status: LauncherStatus, note: Option<String>) {
-        let Some(state) = ui_state(hwnd) else {
-            return;
+        {
+            let Some(state) = ui_state(hwnd) else {
+                return;
+            };
+            state.status_value = status;
+            state.note_text = note;
+            if !matches!(state.status_value, LauncherStatus::Starting) {
+                state.status_pulse = false;
+            }
+        }
+        paint_lifecycle_now(hwnd);
+    }
+
+    unsafe fn paint_lifecycle_now(hwnd: HWND) {
+        let (start, stop, start_label, stop_label) = {
+            let Some(state) = ui_state(hwnd) else {
+                return;
+            };
+            state.last_status_sig.clear();
+            (
+                state.start,
+                state.stop,
+                button_label(IDC_START, state),
+                button_label(IDC_STOP, state),
+            )
         };
-        state.status_value = status;
-        state.note_text = note;
+        set_text(start, start_label);
+        set_text(stop, stop_label);
         refresh_status_text(hwnd);
+        let _ = InvalidateRect(start, None, true);
+        let _ = InvalidateRect(stop, None, true);
+        let _ = InvalidateRect(hwnd, None, false);
+        let _ = RedrawWindow(
+            hwnd,
+            None,
+            None,
+            RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN,
+        );
+        let _ = UpdateWindow(start);
+        let _ = UpdateWindow(stop);
+        let _ = UpdateWindow(hwnd);
     }
 
     unsafe fn refresh_status_text(hwnd: HWND) {
@@ -3579,13 +4155,27 @@ mod windows_ui {
         };
         let (hero, ai, obs, style) = status_values(state);
         let note = state.note_text.clone().unwrap_or_default();
-        let sig = format!("{hero}|{ai}|{obs}|{style}|{note}");
+        let tts = state
+            .session
+            .as_ref()
+            .and_then(|session| session.tts_hint().status_line())
+            .unwrap_or("");
+        let pulse = u8::from(state.status_pulse);
+        let status = format!("{:?}", state.status_value);
+        let sig = format!("{status}|{hero}|{ai}|{obs}|{style}|{note}|{tts}|{pulse}");
         if state.last_status_sig == sig {
+            invalidate_lifecycle_buttons(state);
             return;
         }
         state.last_status_sig = sig;
         set_text(state.note, &note);
+        invalidate_lifecycle_buttons(state);
         let _ = InvalidateRect(hwnd, None, false);
+    }
+
+    unsafe fn invalidate_lifecycle_buttons(state: &UiState) {
+        let _ = InvalidateRect(state.start, None, true);
+        let _ = InvalidateRect(state.stop, None, true);
     }
 
     unsafe fn popup(hwnd: HWND, message: &str) {
